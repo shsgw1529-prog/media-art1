@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neuro Brain Visualization</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #04060d; height: 100%; }
+  #glcanvas { display: block; position: fixed; inset: 0; }
+
+  /* 手前の2Dポップアップ・レイヤー */
+  #popupLayer {
+    position: fixed; inset: 0; pointer-events: none; z-index: 10; overflow: hidden;
+  }
+  /* レトロOS（Windows 95/98 風）のウィンドウ。灰色＋ベベル枠 */
+  .popup {
+    position: absolute;
+    background: #c0c0c0;
+    padding: 2px;
+    border: 2px solid;
+    border-color: #dfdfdf #808080 #808080 #dfdfdf;  /* 外側ベベル */
+    box-shadow: 1px 1px 0 #000, inset 1px 1px 0 #fff, 3px 3px 10px rgba(0,0,0,0.55);
+    font-family: "MS Sans Serif", Tahoma, Geneva, "Hiragino Kaku Gothic ProN", sans-serif;
+    opacity: 1;
+  }
+
+  /* タイトルバー（青のグラデ＋白文字＋レトロなボタン） */
+  .popup .titlebar {
+    height: 18px; display: flex; align-items: center; gap: 3px; padding: 0 2px 0 3px;
+    background: linear-gradient(90deg, #000080, #1084d0);
+    color: #fff; font: bold 11px/18px "MS Sans Serif", Tahoma, sans-serif;
+  }
+  .popup .titlebar .tico {
+    width: 12px; height: 12px; flex: 0 0 auto;
+    background: linear-gradient(135deg, #fff 45%, #7f7f7f 55%), #c0c0c0; border: 1px solid #fff;
+  }
+  .popup .titlebar .ttext { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .popup .titlebar .tbtn {
+    width: 15px; height: 13px; flex: 0 0 auto;
+    background: #c0c0c0; border: 1px solid; border-color: #fff #404040 #404040 #fff;
+    color: #000; font: bold 9px/11px "MS Sans Serif", Tahoma, sans-serif; text-align: center;
+  }
+
+  /* アドレス欄＝貼り付けた画像のソース（web URL / PC パス）。レトロな沈み込み枠 */
+  .popup .srcbar {
+    height: 16px; line-height: 16px; margin: 2px 1px 1px; padding: 0 4px;
+    background: #fff; border: 1px solid; border-color: #808080 #fff #fff #808080;
+    font: 11px/16px "MS Sans Serif", Tahoma, sans-serif;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #000;
+  }
+  .popup .srcbar.web { color: #0000cc; text-decoration: underline; }
+  .popup .srcbar.pc  { color: #000; }
+
+  .popup .body {
+    position: relative; overflow: hidden; margin: 1px; background: #fff;
+    border: 1px solid; border-color: #808080 #fff #fff #808080;
+  }
+  .popup img, .popup video { display: block; width: 100%; height: 100%; object-fit: cover; }
+
+  /* 画像が読み込めないとき＝「壊れた画像」表示を再現（[not found]） */
+  .popup .broken {
+    width: 100%; height: 100%; box-sizing: border-box; padding: 8px 9px;
+    display: flex; align-items: center; gap: 8px;
+    background: #fff; color: #000; font: 12px/1.3 "MS Sans Serif", Tahoma, sans-serif;
+  }
+  .popup .broken .bic {
+    flex: 0 0 auto; width: 20px; height: 20px; border: 1px solid #000;
+    background:
+      linear-gradient(135deg, transparent 44%, #d02020 44%, #d02020 56%, transparent 56%),
+      #fff;
+  }
+  .popup .broken .balt { color: #000; }
+
+  #hud {
+    position: fixed; left: 14px; top: 12px; z-index: 20;
+    font: 11px/1.5 -apple-system, sans-serif; color: rgba(255,255,255,0.55);
+    pointer-events: none; user-select:none;
+  }
+  #hud b { color: rgba(255,255,255,0.85); font-weight:600; }
+  #legend { position: fixed; right: 14px; top: 12px; z-index:20;
+    font: 11px/1.7 -apple-system, sans-serif; color: rgba(255,255,255,0.7);
+    pointer-events:none; user-select:none; text-align:right; }
+  #legend .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-left:6px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="popupLayer"></div>
+<div id="hud">
+  <b>Neuro Brain</b> — ドラッグ:回転 / ホイール:ズーム / ノードにカーソルを重ねる
+</div>
+<div id="legend"></div>
+
+<!-- Three.js r128 + GLTFLoader (CDN, クラシックスクリプト) -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+
+<script>
+/* ============================================================
+   調整可能な設定（ここをまとめて編集できます）
+   ============================================================ */
+
+// 脳メッシュの .gltf / .glb パス。ファイルが無ければ自動でプレースホルダ脳を生成します。
+const BRAIN_MODEL_PATH = "brain_areas/scene.gltf";
+const BRAIN_OPACITY    = 0.18;   // 脳サーフェスの不透明度 (0.15〜0.25)
+const BRAIN_TARGET_SIZE = 6.6;   // 読み込んだモデルをこの直径程度に正規化（大きいほど画面いっぱい）
+
+// ノードの種類（モダリティ）。各タイプを複数インスタンスに散らして配置する。
+//   center : そのタイプの中心座標 (前=+z, 上=+y, 右=+x)
+//   spread : 散らばりの大きさ（小さい=偏在してかたまる / 大きい=広く散らばる）
+//   count  : そのタイプのノード個数
+const NODE_TYPES = [
+  { name: "一次視覚野 (visual)",   key: "visual",      color: 0x3f7bff, folder: "visual/",      files: [],
+    center: [ 0.0,  0.3, -2.5], spread: 0.9,  count: 11 },  // 後方に偏在
+  { name: "一次聴覚野 (auditory)", key: "auditory",    color: 0x35e07a, folder: "auditory/",    files: [],
+    center: [ 0.0,  0.1,  0.1], spread: 2.6,  count: 16 },  // 両側面〜上方へ広く散らばる
+  { name: "一次味覚野 (gustatory)",key: "gustatory",   color: 0xff8a2a, folder: "gustatory/",   files: [],
+    center: [ 0.6, -0.3,  1.6], spread: 1.6,  count: 9 },   // 前方寄りにやや散らばる
+  { name: "海馬 (hippocampus)",    key: "hippocampus", color: 0xffcf33, folder: "hippocampus/", files: [],
+    center: [ 0.0, -1.1, -0.3], spread: 0.5,  count: 8 },   // 中央下に偏在
+  { name: "扁桃体 (amygdala)",     key: "amygdala",    color: 0xff3b52, folder: "amygdala/",    files: [],
+    center: [ 0.0, -1.2,  0.8], spread: 0.45, count: 7 },   // 中央下前方に偏在
+];
+// 粒子のハブ（求心/遠心の中継点）になるタイプ
+const HUB_TYPES = ["hippocampus", "amygdala"];
+/* files の書き方（素材を入れたらここに列挙）:
+   files: ["clip1.mp4", "photo1.jpg", "loop.mp3", "sound.mp3"]
+   拡張子で自動判別: .mp4/.webm=動画, .jpg/.jpeg/.png/.gif=画像, .mp3/.ogg/.wav=音声
+   空 [] の場合は [not found] のプレースホルダ＋無音で代替します。            */
+
+// 粒子
+const PARTICLE_COUNT = 700;   // 総粒子数（多いほど混雑・重くなる）
+const TAIL           = 7;     // 各粒子の軌跡の点数（発光する尾）
+const PARTICLE_SIZE  = 0.075; // 点のサイズ
+const SPEED_MIN      = 0.10;  // 進行速度（1/秒）
+const SPEED_MAX      = 0.30;
+const ARC_JITTER     = 1.1;   // 経路のふくらみ・迂回量
+
+// ポップアップ
+const MAX_POPUPS            = 60;  // 同時最大枚数（従来の2倍）
+const POPUP_INTERVAL        = 90;  // ホバー中の増殖間隔(ms)（従来の半分＝2倍の速さ）
+const POPUP_REMOVE_INTERVAL = 55;  // カーソルが外れた後、古いものから1枚ずつ消す間隔(ms)
+const CURSOR_AVOID_RADIUS   = 150; // カーソルの周囲この半径(px)にはポップアップを出さない
+const NODE_AVOID_RADIUS     = 88;  // 各ノードの画面上この半径(px)にはポップアップを出さない
+const SINGLE_RATIO          = 0.5; // 単発ランダムで出す割合（残りは重なり束: cascade/row/triple）
+const CENTER_CLEAR_W        = 0.30;// 画面中央（脳のあたり）の幅この割合を常に空ける（周囲だけに出す）
+const CENTER_CLEAR_H        = 0.34;// 同・高さの割合
+
+// カメラ自動回転（デフォルトはオフ。ドラッグでのみ回転）
+const AUTO_ROTATE       = false; // true にすると自動回転する
+const AUTO_ROTATE_SPEED = 0.06;  // rad/秒（AUTO_ROTATE が true のときの速度）
+
+/* ============================================================
+   ここから下は実装
+   ============================================================ */
+
+const canvas = document.getElementById('glcanvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x04060d, 1);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x04060d, 0.06);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.1, 100);
+
+// ---- 手動オービットコントロール（球面座標） ----
+const cam = { theta: 0.6, phi: 1.3, radius: 6.0, target: new THREE.Vector3(0,-0.3,0) };
+let dragging = false, lastX = 0, lastY = 0, lastInteract = 0;
+
+function updateCamera() {
+  const r = cam.radius, p = cam.phi, t = cam.theta;
+  camera.position.set(
+    cam.target.x + r * Math.sin(p) * Math.sin(t),
+    cam.target.y + r * Math.cos(p),
+    cam.target.z + r * Math.sin(p) * Math.cos(t)
+  );
+  camera.lookAt(cam.target);
+}
+canvas.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; lastInteract = performance.now(); });
+window.addEventListener('mouseup', () => dragging = false);
+window.addEventListener('mousemove', e => {
+  if (dragging) {
+    cam.theta -= (e.clientX - lastX) * 0.005;
+    cam.phi   -= (e.clientY - lastY) * 0.005;
+    cam.phi = Math.max(0.15, Math.min(Math.PI - 0.15, cam.phi));
+    lastX = e.clientX; lastY = e.clientY;
+    lastInteract = performance.now();
+  }
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  cam.radius = Math.max(3.5, Math.min(18, cam.radius + e.deltaY * 0.01));
+  lastInteract = performance.now();
+}, { passive: false });
+
+// ---- 照明（半透明サーフェス用の淡い光） ----
+scene.add(new THREE.AmbientLight(0x334455, 1.0));
+const dl = new THREE.DirectionalLight(0x88aaff, 0.6); dl.position.set(3,5,4); scene.add(dl);
+
+// ============================================================
+// 脳メッシュ
+// ============================================================
+const rootGroup = new THREE.Group();
+scene.add(rootGroup);
+
+function addBrainMaterialTo(object) {
+  object.traverse(child => {
+    if (child.isMesh) {
+      child.material = new THREE.MeshPhongMaterial({
+        color: 0x9fb8ff, transparent: true, opacity: BRAIN_OPACITY,
+        shininess: 30, depthWrite: false, side: THREE.DoubleSide,
+      });
+    }
+  });
+}
+
+function makeProceduralBrain() {
+  // .gltf が無い場合のフォールバック：ノイズ変形した楕円体で脳っぽい塊を作る
+  const geo = new THREE.IcosahedronGeometry(1.9, 5);
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const n = 0.14 * Math.sin(v.x*5.0) * Math.sin(v.y*4.0)
+            + 0.10 * Math.sin(v.z*6.0 + v.x*3.0)
+            + 0.06 * Math.sin(v.y*9.0 + v.z*5.0);
+    const fissure = 0.16 * Math.exp(-Math.pow(v.x*3.0, 2)); // 中央の溝
+    v.multiplyScalar(1 + n);
+    v.x *= 1.02; v.y *= 0.92; v.z *= 1.28; // 前後に長い脳の形
+    v.y -= fissure * Math.max(0, v.y);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  const g = new THREE.Group();
+  const surf = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+    color: 0x9fb8ff, transparent: true, opacity: BRAIN_OPACITY,
+    shininess: 30, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  const wire = new THREE.LineSegments(
+    new THREE.WireframeGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0x6f8fff, transparent: true, opacity: 0.06 })
+  );
+  g.add(surf); g.add(wire);
+  return g;
+}
+
+function loadBrain() {
+  if (typeof THREE.GLTFLoader === 'function') {
+    const loader = new THREE.GLTFLoader();
+    loader.load(
+      BRAIN_MODEL_PATH,
+      gltf => {
+        const model = gltf.scene;
+        addBrainMaterialTo(model);
+        // 正規化してrootGroupの中央に
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const scale = BRAIN_TARGET_SIZE / Math.max(size.x, size.y, size.z);
+        model.scale.setScalar(scale);
+        model.position.sub(center.multiplyScalar(scale));
+        rootGroup.add(model);
+        console.log('Brain GLTF loaded:', BRAIN_MODEL_PATH);
+      },
+      undefined,
+      err => {
+        console.warn('GLTF読み込み失敗 → プレースホルダ脳を使用:', BRAIN_MODEL_PATH);
+        rootGroup.add(makeProceduralBrain());
+      }
+    );
+  } else {
+    console.warn('GLTFLoader未読込 → プレースホルダ脳を使用');
+    rootGroup.add(makeProceduralBrain());
+  }
+}
+loadBrain();
+
+// ============================================================
+// ノード（小さな球を、各タイプ複数インスタンスに散らして配置。発光・明滅なし）
+// ============================================================
+const nodeMap = {};        // typeKey -> { def }
+const nodeMeshes = [];     // レイキャスト対象（不可視の当たり判定球）
+const nodeInstances = [];  // { typeKey, color, pos }
+
+// 中央寄りの分布（-1〜+1、ガウス風）
+function gaussish() { return (Math.random() + Math.random() + Math.random() - 1.5) / 1.5; }
+
+// 発光用のソフトな円形テクスチャ（ノードのハロー＆粒子で共用）
+const GLOW_TEX = (function () {
+  const s = 64, cv = document.createElement('canvas'); cv.width = cv.height = s;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+  g.addColorStop(0.0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.28, 'rgba(255,255,255,0.7)');
+  g.addColorStop(0.6, 'rgba(255,255,255,0.22)');
+  g.addColorStop(1.0, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, s, s);
+  return new THREE.CanvasTexture(cv);
+})();
+
+const nodeGeo = new THREE.SphereGeometry(0.05, 16, 16);  // 明るいコア球
+const hitGeo  = new THREE.SphereGeometry(0.26, 8, 8);    // ホバー用の当たり判定（不可視・やや大きめ）
+
+NODE_TYPES.forEach(tp => {
+  const c = new THREE.Color(tp.color);
+  nodeMap[tp.key] = { def: tp };
+  const coreMat = new THREE.MeshBasicMaterial({ color: c });
+  const haloMat = new THREE.SpriteMaterial({
+    map: GLOW_TEX, color: c, transparent: true, opacity: 0.8,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  for (let i = 0; i < tp.count; i++) {
+    const pos = new THREE.Vector3(
+      tp.center[0] + gaussish() * tp.spread,
+      tp.center[1] + gaussish() * tp.spread * 0.9,
+      tp.center[2] + gaussish() * tp.spread
+    );
+    const dot = new THREE.Mesh(nodeGeo, coreMat);   // 明るいコア
+    dot.position.copy(pos);
+    rootGroup.add(dot);
+
+    const halo = new THREE.Sprite(haloMat);          // 静的なグロー（明滅なし）
+    halo.position.copy(pos);
+    halo.scale.setScalar(0.42);
+    rootGroup.add(halo);
+
+    const hit = new THREE.Mesh(hitGeo, new THREE.MeshBasicMaterial({ visible: false }));
+    hit.position.copy(pos);
+    hit.userData.nodeKey = tp.key;
+    rootGroup.add(hit);
+    nodeMeshes.push(hit);
+
+    nodeInstances.push({ typeKey: tp.key, color: c, pos });
+  }
+});
+const hubInstances = nodeInstances.filter(n => HUB_TYPES.includes(n.typeKey));
+
+// 凡例
+document.getElementById('legend').innerHTML = NODE_TYPES.map(n =>
+  `${n.name}<span class="dot" style="background:#${new THREE.Color(n.color).getHexString()}"></span>`
+).join('<br>');
+
+// ============================================================
+// 粒子（ニューロン発火）— 加算合成、曲線経路、双方向
+// ============================================================
+const SAMPLES = 48; // 各粒子の経路サンプル点数
+const tmpV = new THREE.Vector3();
+
+function buildCurveSamples(a, b) {
+  // start→end 間に、法線方向へランダムに膨らむ制御点を持つCatmull-Rom曲線（a,b は Vector3）
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const len = dir.length();
+  const perp1 = new THREE.Vector3(-dir.y, dir.x, 0).normalize();
+  if (perp1.lengthSq() < 0.001) perp1.set(1,0,0);
+  const perp2 = new THREE.Vector3().crossVectors(dir, perp1).normalize();
+
+  function ctrl(t) {
+    const base = new THREE.Vector3().lerpVectors(a, b, t);
+    const amp = ARC_JITTER * len * 0.28 * Math.sin(Math.PI * t); // 端で0、中央で最大
+    base.addScaledVector(perp1, (Math.random()*2-1) * amp);
+    base.addScaledVector(perp2, (Math.random()*2-1) * amp);
+    return base;
+  }
+  const curve = new THREE.CatmullRomCurve3([a.clone(), ctrl(0.33), ctrl(0.66), b.clone()]);
+  return curve.getPoints(SAMPLES - 1); // 配列長 SAMPLES
+}
+
+const particles = [];
+const ENDPOINT_JITTER = 0.35; // 端点をこの範囲でばらつかせ、ノードで一点集束＝発光しないようにする
+function randInstance() { return nodeInstances[(Math.random() * nodeInstances.length) | 0]; }
+function jittered(pos) {
+  return new THREE.Vector3(
+    pos.x + (Math.random() * 2 - 1) * ENDPOINT_JITTER,
+    pos.y + (Math.random() * 2 - 1) * ENDPOINT_JITTER,
+    pos.z + (Math.random() * 2 - 1) * ENDPOINT_JITTER
+  );
+}
+function spawnParticle(p) {
+  // 出発は任意のノード。到着は約55%の確率でハブ（海馬/扁桃体）へ集束させ、求心/遠心の流れを作る
+  const from = randInstance();
+  let to = (Math.random() < 0.55 && hubInstances.length)
+    ? hubInstances[(Math.random() * hubInstances.length) | 0]
+    : randInstance();
+  if (to === from) to = randInstance();
+  p.samples = buildCurveSamples(jittered(from.pos), jittered(to.pos)); // 端点を散らした経路
+  p.color = from.color;                            // 出発ノードのタイプ色
+  p.t = 0;
+  p.speed = SPEED_MIN + Math.random() * (SPEED_MAX - SPEED_MIN);
+  return p;
+}
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  particles.push(spawnParticle({}));
+  // 初期位相をばらす
+  particles[i].t = Math.random();
+}
+
+const totalPts = PARTICLE_COUNT * TAIL;
+const pGeo = new THREE.BufferGeometry();
+const pPos = new Float32Array(totalPts * 3);
+const pCol = new Float32Array(totalPts * 3);
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const pMat = new THREE.PointsMaterial({
+  size: PARTICLE_SIZE, vertexColors: true, transparent: true, opacity: 0.95,
+  map: GLOW_TEX, blending: THREE.AdditiveBlending,
+  depthWrite: false, sizeAttenuation: true,
+});
+const points = new THREE.Points(pGeo, pMat);
+points.frustumCulled = false;
+rootGroup.add(points);
+
+function sampleAt(samples, t) {
+  // t:0..1 → サンプル配列を線形補間
+  if (t <= 0) return samples[0];
+  if (t >= 1) return samples[samples.length - 1];
+  const f = t * (samples.length - 1);
+  const i = f | 0;
+  const frac = f - i;
+  return tmpV.lerpVectors(samples[i], samples[i+1], frac);
+}
+
+const TAIL_GAP = 0.045; // 尾の点どうしのt間隔
+
+function updateParticles(dt) {
+  let idx = 0;
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    p.t += p.speed * dt;
+    if (p.t >= 1) spawnParticle(p);
+
+    const cr = p.color.r, cg = p.color.g, cb = p.color.b;
+    for (let k = 0; k < TAIL; k++) {
+      const tt = p.t - k * TAIL_GAP;
+      const v = sampleAt(p.samples, tt);
+      const o = idx * 3;
+      pPos[o] = v.x; pPos[o+1] = v.y; pPos[o+2] = v.z;
+      const b = (1 - k / TAIL); // 先頭ほど明るい
+      pCol[o] = cr * b; pCol[o+1] = cg * b; pCol[o+2] = cb * b;
+      idx++;
+    }
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.color.needsUpdate = true;
+}
+
+// ============================================================
+// レイキャスト（ホバー判定）
+// ============================================================
+const raycaster = new THREE.Raycaster();
+raycaster.params.Points = { threshold: 0.1 };
+const mouse = new THREE.Vector2(-2, -2);
+let hoverKey = null;
+
+canvas.addEventListener('mousemove', e => {
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  mousePX = e.clientX; mousePY = e.clientY;
+});
+canvas.addEventListener('mouseleave', () => { mouse.set(-2, -2); mousePX = -9999; mousePY = -9999; });
+
+function updateHover() {
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(nodeMeshes, false);
+  const key = hits.length ? hits[0].object.userData.nodeKey : null;
+  if (key !== hoverKey) {
+    hoverKey = key;
+    onHoverChange(key);
+  }
+}
+
+// ============================================================
+// ポップアップ（HTML/CSSレイヤー、素材無しでも動作）
+// ============================================================
+const popupLayer = document.getElementById('popupLayer');
+const activePopups = []; // {el}  … 先頭 = 最も古い
+let spawnTimer = null;   // ホバー中の増殖タイマー
+let removeTimer = null;  // 離脱後、古い順に消すタイマー
+let spawnSeq = 0;
+let currentAudio = null;
+let mousePX = -9999, mousePY = -9999; // カーソルのピクセル座標（回避用）
+
+function extType(f) {
+  const e = f.toLowerCase().split('.').pop();
+  if (['mp4','webm','ogv','mov'].includes(e)) return 'video';
+  if (['jpg','jpeg','png','gif','webp'].includes(e)) return 'image';
+  if (['mp3','ogg','wav','m4a'].includes(e)) return 'audio';
+  return 'other';
+}
+
+function pickMedia(node) {
+  // 動画/画像のファイル名からランダムに1つ。無ければ null（→プレースホルダ）
+  const media = (node.files || []).filter(f => ['video','image'].includes(extType(f)));
+  if (!media.length) return null;
+  return node.folder + media[(Math.random()*media.length)|0];
+}
+function pickAudio(node) {
+  const auds = (node.files || []).filter(f => extType(f) === 'audio');
+  if (!auds.length) return null;
+  return node.folder + auds[(Math.random()*auds.length)|0];
+}
+
+// 素材が無いとき：貼り付けた画像のソース（web URL / PC パス）を再現するための偽パス生成
+const RND = (a) => a[(Math.random()*a.length)|0];
+const HASHES = () => Math.random().toString(36).slice(2, 9);
+function fakeImageSrc() {
+  const ext = RND(['jpg','png','jpeg','gif']);
+  if (Math.random() < 0.5) {
+    // web の画像リンク
+    const host = RND(['i.imgur.com','images.unsplash.com','cdn.pics-host.net',
+      'pbs.twimg.com/media','lh3.googleusercontent.com','static.flickr.com/8203']);
+    const name = RND([HASHES(), 'photo_' + (1000 + (Math.random()*9000|0)),
+      'IMG_' + (1000 + (Math.random()*9000|0)), 'DSC0' + (100 + (Math.random()*900|0))]);
+    return { kind: 'web', path: `https://${host}/${name}.${ext}` };
+  } else {
+    // PC のローカル画像パス（Mac / Windows）
+    if (Math.random() < 0.6) {
+      const dir = RND(['/Users/s.s/Pictures','/Users/s.s/Downloads','/Users/s.s/Desktop',
+        '/Users/s.s/Desktop/sfc課題/現代アート入門']);
+      const name = RND(['IMG_' + (1000 + (Math.random()*9000|0)),
+        'スクリーンショット 2024-07-0' + (1 + (Math.random()*9|0)),
+        'photo' + (Math.random()*99|0), HASHES()]);
+      return { kind: 'pc', path: `${dir}/${name}.${ext.toUpperCase()}` };
+    } else {
+      const name = RND(['image', 'picture', 'IMG_' + (1000 + (Math.random()*9000|0)), HASHES()]);
+      return { kind: 'pc', path: `C:\\Users\\user\\Pictures\\${name}.${ext}` };
+    }
+  }
+}
+
+// 「壊れた画像」＝ [not found] のプレースホルダ（グレースケール、固有色なし）
+function makeBroken() {
+  const el = document.createElement('div');
+  el.className = 'broken';
+  el.innerHTML = `<span class="bic"></span><span class="balt">[not found]</span>`;
+  return el;
+}
+
+// ポップアップ本文と、上部に出すソース文字列/種別を返す
+function makePopupBody(node) {
+  const src = pickMedia(node);
+  if (!src) {
+    const fake = fakeImageSrc();
+    return { content: makeBroken(), srcText: fake.path, srcKind: fake.kind };
+  }
+  const srcKind = /^https?:/i.test(src) ? 'web' : 'pc';
+  const type = extType(src);
+  let content;
+  if (type === 'video') {
+    content = document.createElement('video');
+    content.src = src; content.autoplay = true; content.loop = true;
+    content.muted = true; content.playsInline = true;
+    content.onerror = () => replaceWithBroken(content);
+  } else {
+    content = document.createElement('img');
+    content.src = src;
+    content.onerror = () => replaceWithBroken(content);
+  }
+  return { content, srcText: src, srcKind };
+}
+function replaceWithBroken(el) {
+  if (el.parentNode) el.parentNode.replaceChild(makeBroken(), el);
+}
+
+// 全ノードの画面座標を毎回計算（カーソル＋ノードを避けるため）
+const _proj = new THREE.Vector3();
+let nodeScreen = [];
+function updateNodeScreen() {
+  const W = window.innerWidth, H = window.innerHeight;
+  nodeScreen.length = 0;
+  for (const inst of nodeInstances) {
+    _proj.copy(inst.pos); rootGroup.localToWorld(_proj); _proj.project(camera);
+    if (_proj.z < 1) nodeScreen.push({ x: (_proj.x * 0.5 + 0.5) * W, y: (-_proj.y * 0.5 + 0.5) * H });
+  }
+}
+// その矩形がカーソルとノードを避けているか
+function isClear(x, y, w, h) {
+  const cx = x + w / 2, cy = y + h / 2;
+  // 画面中央（脳のあたり）は常に空ける
+  const ex = (cx - window.innerWidth / 2)  / (window.innerWidth  * CENTER_CLEAR_W);
+  const ey = (cy - window.innerHeight / 2) / (window.innerHeight * CENTER_CLEAR_H);
+  if (ex * ex + ey * ey < 1) return false;
+  if (Math.hypot(cx - mousePX, cy - mousePY) < CURSOR_AVOID_RADIUS) return false;
+  for (const n of nodeScreen) if (Math.hypot(cx - n.x, cy - n.y) < NODE_AVOID_RADIUS) return false;
+  return true;
+}
+// 周囲（周辺リング）だけに出す出現位置。中央/カーソル/ノードは常に避ける
+let fillAngle = Math.random() * Math.PI * 2;
+function edgeInwardPos(w, h) {
+  updateNodeScreen();
+  const W = window.innerWidth, H = window.innerHeight, cx = W / 2, cy = H / 2;
+  const maxR = Math.hypot(cx, cy);
+  for (let i = 0; i < 80; i++) {
+    fillAngle += 2.399963;                       // 黄金角で角度を回し、全周に散らす
+    const r = maxR * (0.42 + Math.random() * 0.56); // 中央には来ない周辺リング
+    let x = cx + Math.cos(fillAngle) * r - w / 2;
+    let y = cy + Math.sin(fillAngle) * r * 0.92 - h / 2;
+    x = Math.max(-w * 0.25, Math.min(W - w * 0.75, x));
+    y = Math.max(-h * 0.10, Math.min(H - h * 0.75, y));
+    if (isClear(x, y, w, h)) return { x, y };   // 中央・カーソル・ノードを避けた位置のみ採用
+  }
+  // フォールバック：四隅のうちカーソルから最も遠い角（必ず中央の外）
+  const corners = [[8, 8], [W - w - 8, 8], [8, H - h - 8], [W - w - 8, H - h - 8]];
+  let best = corners[0], bd = -1;
+  for (const c of corners) {
+    const d = Math.hypot(c[0] + w / 2 - mousePX, c[1] + h / 2 - mousePY);
+    if (d > bd) { bd = d; best = c; }
+  }
+  return { x: best[0], y: best[1] };
+}
+
+// ---- 出現パターン（ただのランダムではなく、束や連なりで出す） ----
+// cascade=斜めに重なって連なる / row=横に連続 / triple=三つを密に重ねる
+let cluster = null;
+function newCluster() {
+  // 半分は単発ランダム(single)、残りは重なり束(cascade/row/triple)を混在させる
+  let mode;
+  if (Math.random() < SINGLE_RATIO) mode = 'single';
+  else mode = ['cascade', 'row', 'triple', 'row'][(Math.random() * 4) | 0];
+  // サイズ帯（大小を混在させる）
+  const r = Math.random();
+  let w = r < 0.42 ? (135 + Math.random() * 55)      // 小
+        : r < 0.80 ? (205 + Math.random() * 70)      // 中
+        :            (295 + Math.random() * 70);      // 大
+  const h = Math.round(w * (0.72 + Math.random() * 0.3));
+  let dx, dy, count;
+  if (mode === 'single')       { dx = 0;  dy = 0;  count = 1; }
+  else if (mode === 'cascade') { dx = 22; dy = 20; count = 3 + (Math.random() * 3 | 0); }
+  else if (mode === 'row')     { dx = w * (0.5 + Math.random() * 0.28); dy = (Math.random() * 2 - 1) * 12; count = 3 + (Math.random() * 3 | 0); }
+  else                         { dx = 11; dy = 9;  count = 3; } // triple
+  // 束全体がカーソル・ノードを避け、外側→内側の流れで収まる開始位置
+  const spanX = Math.abs(dx) * (count - 1) + w;
+  const spanY = Math.abs(dy) * (count - 1) + h + 40;
+  const anchor = edgeInwardPos(spanX, spanY);
+  return { w, h, dx, dy, remaining: count, x: anchor.x, y: anchor.y };
+}
+function nextPlacement() {
+  if (!cluster || cluster.remaining <= 0) cluster = newCluster();
+  const sw = Math.round(cluster.w * (0.9 + Math.random() * 0.2));
+  const sh = Math.round(cluster.h * (0.9 + Math.random() * 0.2));
+  // 少し(-30%まで)はみ出しを許しつつ、大半が画面に残るようクランプ
+  let x = Math.max(-sw * 0.28, Math.min(window.innerWidth  - sw * 0.72, cluster.x));
+  let y = Math.max(-sh * 0.10, Math.min(window.innerHeight - sh * 0.72, cluster.y));
+  cluster.x += cluster.dx; cluster.y += cluster.dy;
+  cluster.remaining--;
+  // 束が中央/カーソル/ノードに入り込む位置になったら、その束は打ち切り外周へ取り直す
+  if (!isClear(x, y, sw, sh)) {
+    const a = edgeInwardPos(sw, sh);
+    x = a.x; y = a.y; cluster.remaining = 0;
+  }
+  return { x: Math.round(x), y: Math.round(y), w: sw, h: sh };
+}
+
+function spawnPopup(node) {
+  if (activePopups.length >= MAX_POPUPS) removePopup(activePopups[0]);
+
+  const pl = nextPlacement();
+  const { content, srcText, srcKind } = makePopupBody(node);
+  const base = srcText.split(/[\\/]/).pop() || srcText; // ファイル名（タイトルバー用）
+
+  const el = document.createElement('div');
+  el.className = 'popup';
+  el.style.width = pl.w + 'px';
+  el.style.left  = pl.x + 'px';
+  el.style.top   = pl.y + 'px';
+  el.style.zIndex = String(11 + (spawnSeq++ % 500));
+
+  // レトロなタイトルバー（ファイル名＋最小化/最大化/閉じるボタン）
+  const titlebar = document.createElement('div');
+  titlebar.className = 'titlebar';
+  titlebar.innerHTML =
+    `<span class="tico"></span><span class="ttext"></span>` +
+    `<span class="tbtn">_</span><span class="tbtn">□</span><span class="tbtn">×</span>`;
+  titlebar.querySelector('.ttext').textContent = base;
+
+  // アドレス欄＝貼り付けた画像のソース（web の URL / PC のパス）
+  const srcbar = document.createElement('div');
+  srcbar.className = 'srcbar ' + srcKind;
+  srcbar.textContent = srcText;
+
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.style.height = Math.max(38, pl.h - 44) + 'px';
+  body.appendChild(content);
+
+  el.appendChild(titlebar);
+  el.appendChild(srcbar);
+  el.appendChild(body);
+  popupLayer.appendChild(el);
+  activePopups.push({ el });
+}
+
+function removePopup(rec) {
+  const i = activePopups.indexOf(rec);
+  if (i >= 0) activePopups.splice(i, 1);
+  if (rec && rec.el && rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
+}
+
+function startAudio(node) {
+  stopAudio();
+  const src = pickAudio(node);
+  if (!src) return;
+  currentAudio = new Audio(src);
+  currentAudio.loop = true;
+  currentAudio.volume = 0.7;
+  currentAudio.play().catch(()=>{}); // 自動再生ブロック時は無音で続行
+}
+function stopAudio() {
+  if (currentAudio) { try { currentAudio.pause(); } catch(e){} currentAudio = null; }
+}
+
+function onHoverChange(key) {
+  if (key) {
+    // ノードに乗った：消去中なら止め、増殖を開始
+    if (removeTimer) { clearInterval(removeTimer); removeTimer = null; }
+    if (spawnTimer) clearInterval(spawnTimer);
+    cluster = null; // 新しいホバーごとに束を仕切り直す
+    const node = nodeMap[key].def;
+    spawnPopup(node);
+    spawnTimer = setInterval(() => spawnPopup(node), POPUP_INTERVAL);
+    startAudio(node);
+    document.body.style.cursor = 'pointer';
+  } else {
+    // ノードから外れた：増殖を止め、古いものから1枚ずつ消す（フェードなし）
+    if (spawnTimer) { clearInterval(spawnTimer); spawnTimer = null; }
+    stopAudio();
+    document.body.style.cursor = 'default';
+    if (!removeTimer) {
+      removeTimer = setInterval(() => {
+        if (activePopups.length === 0) { clearInterval(removeTimer); removeTimer = null; return; }
+        removePopup(activePopups[0]); // 先頭 = 最も古い
+      }, POPUP_REMOVE_INTERVAL);
+    }
+  }
+}
+
+// ============================================================
+// アニメーションループ
+// ============================================================
+let prev = performance.now();
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, (now - prev) / 1000);
+  prev = now;
+
+  // 自動回転（デフォルト off。ドラッグ／操作の直後は止める）
+  if (AUTO_ROTATE && !dragging && now - lastInteract > 400) {
+    cam.theta += AUTO_ROTATE_SPEED * dt;
+  }
+  updateCamera();
+
+  updateParticles(dt);
+  updateHover();
+
+  renderer.render(scene, camera);
+}
+updateCamera();
+requestAnimationFrame(animate);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
